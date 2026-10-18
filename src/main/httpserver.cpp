@@ -4149,20 +4149,26 @@ int HttpServerImpl::configServerBasics(int reconfig, const XmlNode *pRoot)
         testAndFixDirs("tmp/ocspcache", procConf.getUid(), procConf.getGid(), 0700);
         fixConfDirsPermission();
 
-        char syscmd[1024] = {0};
+        // Group membership maintenance is only needed for a privileged
+        // WebAdmin installation, never for configuration checks or user runs.
+        if (getuid() == 0 && !MainServerConfigObj.getConfTestMode()
+            && !MainServerConfigObj.getDisableWebAdmin())
+        {
+            char syscmd[1024] = {0};
 #if defined(linux) || defined(__linux) || defined(__linux__) || defined(__gnu_linux__)
-        snprintf(syscmd, 1024, "usermod -a -G %s lsadm", MainServerConfigObj.getGroup());
+            snprintf(syscmd, 1024, "usermod -a -G %s lsadm", MainServerConfigObj.getGroup());
 #endif
 
 #if defined(__FreeBSD__ ) || defined(__NetBSD__) || defined(__OpenBSD__)
-        snprintf(syscmd, 1024, "pw usermod lsadm -G %s", MainServerConfigObj.getGroup());
+            snprintf(syscmd, 1024, "pw usermod lsadm -G %s", MainServerConfigObj.getGroup());
 #endif
 
 #if defined(macintosh) || defined(__APPLE__) || defined(__APPLE_CC__)
-        snprintf(syscmd, 1024, "dseditgroup -o edit -a lsadm -t user %s", MainServerConfigObj.getGroup());
+            snprintf(syscmd, 1024, "dseditgroup -o edit -a lsadm -t user %s", MainServerConfigObj.getGroup());
 #endif
-        if (*syscmd)
-            ::system(syscmd);
+            if (*syscmd)
+                ::system(syscmd);
+        }
 
         return 0;
     }

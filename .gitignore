@@ -1,4 +1,5 @@
 build/
+.buildols/
 __pycache__
 *.orig
 *.rej
