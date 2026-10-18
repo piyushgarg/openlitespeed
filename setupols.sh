@@ -4,11 +4,23 @@
 # QUICK START
 #   ./buildols.sh --strip
 #   ./setupols.sh --docroot /path/to/static-site --user alice --start
+#   For another Linux x86-64 host, copy dist/bin/openlitespeed-static from a
+#   successful ./buildols.sh --strip build. Its filename alone does not prove
+#   static linkage: readelf -l must show no INTERP, and -d no NEEDED entries.
+#   A GLIBC_x.y not found error usually means a dynamically linked binary was
+#   copied instead. Recopy the verified static output; do not replace system libc.
 #
 # DEFAULTS
 #   Install: $HOME/apps/lsws; HTTPS: [::]:8443 (IPv4 and IPv6).
 #   TLS: $HOME/.config/ssl/fullchain.pem and privkey.pem.
 #   Runs as your current user without sudo. PHP/WebAdmin are disabled.
+#   Static compression: Brotli preferred when accepted, gzip fallback; level 6.
+#   Eligible compressible files: 300 bytes to 10 MiB. Already-compressed formats
+#   are excluded by OpenLiteSpeed's default compressible MIME types.
+#   Compressed variants are generated automatically in PREFIX/tmp/compression.
+#   Clients that accept neither encoding receive the original uncompressed file.
+#   Existing installs: stop the server, run ./setupols.sh --configure-compression,
+#   then start it again. Other configuration, site content and accounts are retained.
 #
 # LISTENER CONFIGURATION
 #   --bind/--port override IP/PORT environment variables.
@@ -29,6 +41,9 @@
 # values retain the saved listener. Invalid overrides leave it unchanged.
 # start refuses different overrides when already running; use restart instead.
 # foreground uses exec (no shell wrapper), for a container/service supervisor.
+# No command defaults to foreground: a supervisor can launch runserver.sh
+# directly with IP/PORT in its environment. Use --help for usage information.
+# The effective HTTPS listener is printed to stdout before starting the server.
 # In foreground mode, use the supervisor to restart the process.
 # Daemon-mode reload sends SIGUSR1 for a graceful restart; stop sends SIGTERM.
 # SIGHUP requests shutdown, not reload. SIGUSR2 toggles worker debug logging.
@@ -43,7 +58,7 @@ umask 077
 SOURCE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 PREFIX="${HOME}/apps/lsws"
 DOCROOT=
-CERT_DIR="${HOME}/.config/ssl"
+CERT_DIR="${HOME}"
 CERT=
 KEY=
 BIND=${IP-::}
@@ -52,6 +67,7 @@ BIND_EXPLICIT=${IP+x}
 PORT_EXPLICIT=${PORT+x}
 VARIANT=static
 CLEAN=0
+CONFIGURE_COMPRESSION=0
 START=0
 USERNAME=
 PASSWORD_STDIN=0
@@ -72,12 +88,16 @@ Usage: ./setupols.sh [options]
   --password-stdin     Read that account's password from stdin instead of prompting
   --start              Start after installation (requires a site account)
   --clean              Back up the target directory before a fresh installation
+  --configure-compression
+                       Enable Brotli + gzip on an existing install without cleaning
   --help               Show help
 
 Existing site configuration/content/passwords are preserved unless --clean is used.
 IP and PORT environment variables set the listener; --bind/--port take precedence.
 Explicit listener overrides also update existing installs, preserving other settings.
 The installed runserver.sh accepts IP/PORT for start, restart, test and foreground.
+With no command it defaults to foreground, for launchers that supply only IP/PORT.
+The effective HTTPS listener is printed to stdout on start/foreground.
 Omitted runtime values retain the saved listener. Explicit overrides are validated
 and saved in conf/httpd_config.conf, so subsequent runs without overrides reuse them.
 Invalid overrides leave the saved listener unchanged. stop/status/version ignore them.
@@ -98,6 +118,16 @@ Runtime control:
   test        Apply/validate explicit listener overrides and check configuration.
   version     Print the server version.
 Use a supervisor restart in foreground mode. SIGHUP shuts down; it does not reload.
+
+Static compression (enabled by default for new installs):
+  Prefer Brotli (br) when accepted by the client; gzip is available as a fallback.
+  Brotli/gzip use level 6. Eligible MIME types follow OpenLiteSpeed's defaults;
+  files must be 300 bytes to 10 MiB. Encoded files are cached in PREFIX/tmp/compression.
+  Clients accepting neither encoding receive the original file. Large files may
+  initially be served uncompressed while the cache is generated in the background.
+  To enable these defaults on an existing install, stop it and run:
+    ./setupols.sh --configure-compression --start
+  This changes only compression settings; existing site/TLS/auth settings remain.
 
 Site accounts (HTTP Basic Auth, not Unix or WebAdmin accounts):
   ~/apps/lsws/siteuser.sh add alice       # Hidden password and confirmation prompts.
@@ -123,6 +153,7 @@ while (($#)); do
                 --variant) VARIANT=$value ;; --user) USERNAME=$value ;;
             esac ;;
         --clean) CLEAN=1; shift ;; --start) START=1; shift ;;
+        --configure-compression) CONFIGURE_COMPRESSION=1; shift ;;
         --password-stdin) PASSWORD_STDIN=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) die "Unknown option: $1 (see --help)" ;;
@@ -156,7 +187,15 @@ FRESH=1
 [[ ! -f "$PREFIX/conf/httpd_config.conf" || "$CLEAN" == 1 ]] || FRESH=0
 BINARY="$SOURCE/dist/bin/openlitespeed-$VARIANT"
 [[ -x "$BINARY" ]] || die "Build the binary first: $SOURCE/buildols.sh --strip"
-"$BINARY" -v >/dev/null
+if [[ "$VARIANT" == static ]]; then
+    command -v readelf >/dev/null || die 'Missing tool: readelf (install binutils to verify static linkage)'
+    elf_headers=$(LC_ALL=C readelf --wide --program-headers "$BINARY") || die "Cannot inspect ELF binary: $BINARY"
+    elf_dynamic=$(LC_ALL=C readelf --wide --dynamic "$BINARY") || die "Cannot inspect ELF dependencies: $BINARY"
+    if [[ "$elf_headers" == *INTERP* || "$elf_dynamic" == *NEEDED* ]]; then
+        die "$BINARY is dynamically linked despite its static filename. Rebuild with ./buildols.sh --strip or copy the verified dist/bin/openlitespeed-static from the build machine."
+    fi
+fi
+"$BINARY" -v >/dev/null || die "Binary cannot run on this host: $BINARY (check CPU architecture and, for --variant dynamic, the host glibc version)"
 if ((FRESH)); then
     [[ -n "$DOCROOT" ]] || DOCROOT="$PREFIX/html"
     DOCROOT=$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).expanduser().resolve())' "$DOCROOT")
@@ -191,7 +230,7 @@ PY
         echo "Previous installation backed up to: $backup"
     fi
 fi
-mkdir -p "$PREFIX"/{bin,conf/auth,conf/vhosts/site,logs,run/status,tmp/swap,cachedata,autoupdate,cgid,admin/tmp,share/autoindex}
+mkdir -p "$PREFIX"/{bin,conf/auth,conf/vhosts/site,logs,run/status,tmp/swap,tmp/compression,cachedata,autoupdate,cgid,admin/tmp,share/autoindex}
 chmod 700 "$PREFIX/conf/auth" "$PREFIX/run"
 install -m 755 "$BINARY" "$PREFIX/bin/openlitespeed"
 ln -sfn openlitespeed "$PREFIX/bin/litespeed"
@@ -218,6 +257,9 @@ if ((FRESH)); then
     echo "Document root: $DOCROOT"
 else
     echo 'Existing configuration, document root and accounts preserved.'
+    if ((CONFIGURE_COMPRESSION)); then
+        python3 "$SOURCE/scripts/ols/render-config.py" --compression "$PREFIX"
+    fi
 fi
 if [[ -n "$USERNAME" ]]; then
     password_options=()

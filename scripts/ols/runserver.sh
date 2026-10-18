@@ -4,6 +4,7 @@
 #   IP='::' PORT=9443 ./runserver.sh start
 #   IP='127.0.0.1' PORT=9443 ./runserver.sh restart
 #   IP='::' PORT=9443 ./runserver.sh foreground
+# With no command, runs in foreground for a process supervisor.
 # Omitted variables retain the saved listener. Changes persist in the config.
 # TLS/authentication settings are preserved; failed validation restores the config.
 set -euo pipefail
@@ -12,7 +13,8 @@ export LSWS_HOME="$ROOT"
 export OLS_PID_FILE="$ROOT/run/lshttpd.pid"
 BINARY="$ROOT/bin/openlitespeed"
 usage() {
-    echo "Usage: [IP=ADDRESS] [PORT=NUMBER] $0 {start|stop|restart|reload|status|test|foreground|version}"
+    echo "Usage: [IP=ADDRESS] [PORT=NUMBER] $0 [start|stop|restart|reload|status|test|foreground|version]"
+    echo 'No command defaults to foreground; use --help to show this help.'
     echo 'IP/PORT override only the HTTPS listener; omitted values retain the saved configuration.'
     echo 'Listener changes are saved after validation. Use restart to change a running listener.'
     echo 'foreground uses exec for supervision by a container or service manager.'
@@ -43,7 +45,7 @@ Daemon signal behavior: SIGUSR1 gracefully restarts; SIGTERM stops;
 SIGHUP requests delayed shutdown; SIGUSR2 is for worker debug logging.
 EOF
 }
-case "${1:-help}" in help|--help|-h) usage; exit 0 ;; esac
+case "${1:-foreground}" in help|--help|-h) usage; exit 0 ;; esac
 mkdir -p "$ROOT/run" "$ROOT/logs"
 exec 9>"$ROOT/run/control.lock"
 flock -x 9
@@ -76,6 +78,7 @@ start() {
     fi
     configure_listener
     test_config
+    python3 "$ROOT/bin/configure-listener.py" "$ROOT" --show
     (exec 9>&-; "$BINARY") >> "$ROOT/logs/launcher.log" 2>&1
     for ((attempt=0; attempt<100; attempt++)); do
         if running && python3 "$ROOT/bin/configure-listener.py" "$ROOT" --ready; then
@@ -98,7 +101,7 @@ stop() {
     echo "PID $old_pid has not stopped; inspect logs/error.log." >&2
     return 1
 }
-case "${1:-}" in
+case "${1:-foreground}" in
     start) start ;;
     stop) stop ;;
     restart)
@@ -132,6 +135,8 @@ case "${1:-}" in
         [[ -s "$ROOT/conf/auth/htpasswd" ]] || { echo 'Create a site user first.' >&2; exit 1; }
         configure_listener
         test_config
+        echo 'Starting OpenLiteSpeed in foreground (supervised).'
+        python3 "$ROOT/bin/configure-listener.py" "$ROOT" --show
         exec 9>&-
         exec "$BINARY" -d ;;
     *) usage >&2; exit 2 ;;

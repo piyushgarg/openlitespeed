@@ -143,7 +143,7 @@ if [[ ! -f "$ROOT/lsquic/CMakeLists.txt" ]]; then
     cp -R "$WORK/src/lsquic/." "$ROOT/lsquic/"
 fi
 # Revisions recorded by the LSQUIC commit in LSQUICCOMMIT.
-if [[ ! -f "$ROOT/lsquic/src/lshpack/hpack.c" ]]; then
+if [[ ! -f "$ROOT/lsquic/src/lshpack/lshpack.c" ]]; then
     fetch lshpack https://github.com/litespeedtech/ls-hpack/archive/cf0f70dd10b352194c97448eb5d00b4aa484f531.tar.gz
     mkdir -p "$ROOT/lsquic/src/lshpack"
     cp -R "$WORK/src/lshpack/." "$ROOT/lsquic/src/lshpack/"

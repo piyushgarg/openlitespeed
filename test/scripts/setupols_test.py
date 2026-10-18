@@ -33,6 +33,34 @@ class SetupOLSTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout)
         return result
 
+    def check_compression(self, prefix, certificates, port, content):
+        headers = prefix / 'logs/compression-headers.txt'
+        decoded = prefix / 'logs/compression-decoded.html'
+        for accepted, expected in (('gzip, br', 'br'), ('gzip', 'gzip'), ('identity', None)):
+            deadline = time.monotonic() + 4
+            while True:
+                result = self.command(
+                    'curl', '--noproxy', '*', '--silent', '--show-error', '--fail',
+                    '--max-time', '5', '--cacert', certificates / 'fullchain.pem',
+                    '--user', 'alice:Initial-Test-password', '--compressed',
+                    '--header', 'Accept-Encoding: ' + accepted, '--dump-header', headers,
+                    '--output', decoded, '--write-out', '%{size_download}',
+                    f'https://127.0.0.1:{port}/compression.html',
+                )
+                self.assertEqual(decoded.read_text(), content)
+                fields = headers.read_text().lower()
+                match = re.search(r'(?m)^content-encoding:\s*([^\r\n]+)', fields)
+                encoding = match[1].strip() if match else None
+                if encoding == expected or time.monotonic() >= deadline:
+                    break
+                # A cache created for another encoding in the same second can
+                # initially produce identity while OLS refreshes its cache.
+                time.sleep(0.2)
+            self.assertEqual(encoding, expected, fields)
+            if expected:
+                # Streaming responses need not include Content-Length.
+                self.assertLess(int(result.stdout), len(content))
+
     def check_runtime_listener(self, prefix, context, password):
         control = prefix / 'runserver.sh'
         config = prefix / 'conf/httpd_config.conf'
@@ -84,33 +112,42 @@ class SetupOLSTest(unittest.TestCase):
         self.assertEqual(config.read_bytes(), broken)
         config.write_bytes(valid)
 
-        # Override only PORT, retain IPv6 dual stack, and verify exec/signal handling.
-        port = port_number()
-        env = dict(self.environment, PORT=str(port))
-        with (prefix / 'logs/foreground-test.log').open('w') as log:
-            process = subprocess.Popen([str(control), 'foreground'], env=env,
-                                       stdout=log, stderr=subprocess.STDOUT)
-            try:
-                deadline = time.monotonic() + 10
-                while True:
-                    if process.poll() is not None:
-                        self.fail('Foreground server exited before serving requests:\n'
-                                  + (prefix / 'logs/foreground-test.log').read_text())
-                    try:
-                        self.assertEqual(fetch(port, '[::1]'), (200, b'private site content'))
-                        break
-                    except (OSError, urllib.error.URLError):
-                        if time.monotonic() >= deadline:
-                            self.fail('Foreground server did not become ready')
-                        time.sleep(0.05)
-                self.assertEqual(int((prefix / 'run/lshttpd.pid').read_text()), process.pid)
-                self.assertEqual(fetch(port, '127.0.0.1'), (200, b'private site content'))
-                process.send_signal(signal.SIGTERM)
-                self.assertEqual(process.wait(timeout=10), 0)
-            finally:
-                if process.poll() is None:
-                    self.command(control, 'stop')
-                    process.wait(timeout=10)
+        # Explicit foreground and a supervisor's argument-free invocation both
+        # apply overrides, log the endpoint and keep the supervised exec PID.
+        self.assertIn('No command defaults to foreground', self.command(control, '--help').stdout)
+        self.command(control, environment={'IP': 'invalid'}, success=False)
+        self.assertEqual(config.read_bytes(), valid)
+        for arguments in (['foreground'], []):
+            port = port_number()
+            env = dict(self.environment, PORT=str(port))
+            if not arguments:
+                env['IP'] = '::'
+            log_path = prefix / 'logs/foreground-test.log'
+            with log_path.open('w') as log:
+                process = subprocess.Popen([str(control), *arguments], env=env,
+                                           stdout=log, stderr=subprocess.STDOUT)
+                try:
+                    deadline = time.monotonic() + 10
+                    while True:
+                        if process.poll() is not None:
+                            self.fail('Foreground server exited before serving requests:\n'
+                                      + log_path.read_text())
+                        try:
+                            self.assertEqual(fetch(port, '[::1]'), (200, b'private site content'))
+                            break
+                        except (OSError, urllib.error.URLError):
+                            if time.monotonic() >= deadline:
+                                self.fail('Foreground server did not become ready')
+                            time.sleep(0.05)
+                    self.assertEqual(int((prefix / 'run/lshttpd.pid').read_text()), process.pid)
+                    self.assertEqual(fetch(port, '127.0.0.1'), (200, b'private site content'))
+                    self.assertIn(f'HTTPS listener: [::]:{port}', log_path.read_text())
+                    process.send_signal(signal.SIGTERM)
+                    self.assertEqual(process.wait(timeout=10), 0)
+                finally:
+                    if process.poll() is None:
+                        self.command(control, 'stop')
+                        process.wait(timeout=10)
         self.assertIn(f'address [::]:{port}'.encode(), config.read_bytes())
         self.assertEqual((prefix / 'conf/auth/htpasswd').read_bytes(), accounts)
 
@@ -146,6 +183,8 @@ class SetupOLSTest(unittest.TestCase):
                     site = work / f'{variant} website'
                     site.mkdir()
                     (site / 'index.html').write_text('private site content')
+                    compressible = '<!doctype html><p>Brotli preferred with gzip fallback.</p>\n' * 500
+                    (site / 'compression.html').write_text(compressible)
                     (site / '.hidden').write_text('must not be served')
                     (site / 'nested').mkdir()
                     (site / 'nested' / 'page.html').write_text('nested private content')
@@ -193,6 +232,7 @@ class SetupOLSTest(unittest.TestCase):
                         self.assertEqual(request(user='alice', password='wrong')[0], 401)
                         self.assertEqual(request(user='alice', password='Initial-Test-password')[:2],
                                          (200, b'private site content'))
+                        self.check_compression(prefix, certificates, port, compressible)
                         self.assertEqual(request(host='[::1]')[0], 401)
                         self.assertEqual(request(user='alice', password='Initial-Test-password', host='[::1]')[:2],
                                          (200, b'private site content'))
@@ -238,6 +278,18 @@ class SetupOLSTest(unittest.TestCase):
                     expected = re.sub(rb'(?m)^([ \t]*address[ \t]+)\S+',
                                       lambda match: match[1] + f'[::1]:{port}'.encode(), current)
                     self.assertEqual(config.read_bytes(), expected)
+                    self.assertEqual((prefix / 'conf/auth/htpasswd').read_bytes(), passwords_before)
+                    # Explicit migration restores compression without replacing
+                    # listener, TLS, authentication or custom configuration.
+                    desired = config.read_bytes()
+                    vhconfig = prefix / 'conf/vhosts/site/vhconf.conf'
+                    desired_vhost = vhconfig.read_bytes()
+                    config.write_bytes(desired.replace(b'gzipAutoUpdateStatic 1', b'gzipAutoUpdateStatic 0')
+                                       .replace(b'brStaticCompressLevel 6', b'brStaticCompressLevel 0'))
+                    vhconfig.write_bytes(desired_vhost.replace(b'enableBr 1', b'enableBr 0'))
+                    self.command(*setup, '--configure-compression')
+                    self.assertEqual(config.read_bytes(), desired)
+                    self.assertEqual(vhconfig.read_bytes(), desired_vhost)
                     self.assertEqual((prefix / 'conf/auth/htpasswd').read_bytes(), passwords_before)
                     self.command(*setup, '--clean')
                     backups = list(work.glob(prefix.name + '.backup-*'))

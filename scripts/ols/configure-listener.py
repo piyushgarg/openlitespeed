@@ -27,6 +27,9 @@ def main():
         raise ValueError('Expected exactly one address in listener HTTPS')
     address = addresses[0]
     saved_ip, saved_port = address[2].rsplit(':', 1)
+    if operation == '--show':
+        print(f'HTTPS listener: {address[2]}')
+        return 0
     if operation == '--ready':
         host = saved_ip.strip('[]')
         host = {'::': '::1', '0.0.0.0': '127.0.0.1'}.get(host, host)
